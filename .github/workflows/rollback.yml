@@ -1,0 +1,81 @@
+name: Rollback Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      timestamp:
+        description: 'Artifact timestamp (e.g. 20260819-162600) or "latest"'
+        required: true
+        default: 'latest'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  EC2_INSTANCE: i-048117c391049faa7
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::987119352718:role/kairacure-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: List available artifacts
+        run: |
+          echo "Available backend artifacts:"
+          aws s3 ls s3://kairacure-artifacts-prod/backend/ --region ${{ env.AWS_REGION }}
+
+      - name: Rollback to specified version
+        run: |
+          VERSION=${{ github.event.inputs.timestamp }}
+          S3_KEY="backend/${VERSION}.zip"
+          if [ "$VERSION" = "latest" ]; then
+            S3_KEY="backend/latest.zip"
+          fi
+
+          COMMAND_ID=$(aws ssm send-command \
+            --region ${{ env.AWS_REGION }} \
+            --instance-ids ${{ env.EC2_INSTANCE }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "cd /opt/kairacure",
+              "aws s3 cp s3://kairacure-artifacts-prod/'"$S3_KEY"' /tmp/backend.zip --region ap-south-1",
+              "pm2 stop kairacure-api 2>/dev/null || true",
+              "rm -rf kairacure-backend-api",
+              "unzip -o /tmp/backend.zip",
+              "rm -f /tmp/backend.zip",
+              "cd kairacure-backend-api",
+              "npm ci --production",
+              "pm2 start index.js --name kairacure-api --max-memory-restart 300M",
+              "pm2 save",
+              "sleep 3",
+              "curl -sf http://localhost:5000/api/health || exit 1",
+              "echo ROLLBACK_SUCCESS"
+            ]' \
+            --query 'Command.CommandId' --output text)
+
+          echo "SSM Command: $COMMAND_ID"
+          sleep 60
+
+          STATUS=$(aws ssm get-command-invocation \
+            --region ${{ env.AWS_REGION }} \
+            --command-id "$COMMAND_ID" \
+            --instance-id ${{ env.EC2_INSTANCE }} \
+            --query 'Status' --output text)
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Rollback failed!"
+            aws ssm get-command-invocation \
+              --region ${{ env.AWS_REGION }} \
+              --command-id "$COMMAND_ID" \
+              --instance-id ${{ env.EC2_INSTANCE }} \
+              --query 'StandardErrorContent' --output text
+            exit 1
+          fi
+
+          echo "Rollback to $VERSION completed successfully"

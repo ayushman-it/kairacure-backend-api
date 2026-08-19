@@ -11,21 +11,6 @@ const encryptedPayloadSchema = new mongoose.Schema(
   { _id: false },
 );
 
-const attachmentSchema = new mongoose.Schema(
-  {
-    fileId: { type: String, required: true, trim: true },
-    originalFilename: { type: String, required: true, trim: true },
-    extension: { type: String, default: '' },
-    mimeType: { type: String, default: 'application/octet-stream' },
-    sizeBytes: { type: Number, default: 0 },
-    category: { type: String, default: 'medical-report', trim: true },
-    notes: { type: String, default: '', trim: true },
-    uploadedBy: { type: String, required: true, trim: true },
-    uploadedAt: { type: Date, default: Date.now },
-  },
-  { _id: false },
-);
-
 const patientRecordSchema = new mongoose.Schema(
   {
     patientId: { type: String, required: true, unique: true, index: true },
@@ -48,7 +33,6 @@ const patientRecordSchema = new mongoose.Schema(
       messages: [{ type: mongoose.Schema.Types.Mixed }],
       activities: [{ type: mongoose.Schema.Types.Mixed }],
     },
-    attachments: { type: [attachmentSchema], default: [] },
     encryptedMedicalData: { type: encryptedPayloadSchema, required: true },
     createdBy: { type: String, default: 'patient-signup', trim: true },
   },

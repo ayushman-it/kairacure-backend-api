@@ -10,12 +10,7 @@ export async function connectDB() {
     throw new Error('MONGO_PUBLIC_URI or MONGO_URI is required');
   }
 
-  mongoose.set('bufferCommands', false);
-
-  await mongoose.connect(publicUri, {
-    serverSelectionTimeoutMS: 4000,
-    connectTimeoutMS: 4000,
-  });
+  await mongoose.connect(publicUri);
   console.log('Public MongoDB connected');
 
   if (!patientUri) {
