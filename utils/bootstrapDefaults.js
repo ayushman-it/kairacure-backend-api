@@ -47,47 +47,7 @@ export function hospitalDefaults() {
 }
 
 export function treatmentDefaults() {
-  const byTitle = new Map();
-
-  // Build from surgery seed records — use the actual surgery name as title,
-  // and the treatment/category field as group so "Cardiac Sciences" is the
-  // category and "Coronary Artery Bypass Grafting (CABG)" is the title.
-  adminSeedRecords
-    .filter((record) => record.recordType === 'surgery')
-    .forEach((record) => {
-      const data = record.publicData || {};
-      const title = data.surgery || record.title;          // real procedure name
-      const group = data.treatment || data.category || title; // clinical category
-      if (!byTitle.has(title)) {
-        byTitle.set(title, {
-          title,
-          subtitle: group,
-          description: `Plan ${title} in India with verified hospitals, doctors, and backend-managed package estimates.`,
-          group,
-          specialty: group,
-          packageFrom: Number(data.medijourneyPriceInr || data.hospitalCostInr || 0),
-          image: treatmentImages[group] || treatmentImages[data.category] || treatmentImages.Orthopedics,
-          active: true,
-        });
-      }
-    });
-  hospitalDefaults().forEach((hospital) => {
-    (hospital.tags || []).forEach((title) => {
-      if (!byTitle.has(title)) {
-        byTitle.set(title, {
-          title,
-          subtitle: hospital.specialty || title,
-          description: `${title} care mapped from backend NABH hospital catalog for ${hospital.city}.`,
-          group: hospital.specialty || title,
-          specialty: hospital.specialty || title,
-          packageFrom: Number(hospital.packageFrom || 0),
-          image: treatmentImages[title] || treatmentImages[hospital.specialty] || treatmentImages.Orthopedics,
-          active: true,
-        });
-      }
-    });
-  });
-  return [...byTitle.values()];
+  return [];
 }
 
 export function doctorDefaults(hospitals = hospitalDefaults()) {

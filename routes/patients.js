@@ -146,6 +146,44 @@ async function updatePatientDashboardForAdmin(patientId, updates = {}) {
   ).lean();
 }
 
+async function addPatientAttachmentForAdmin(patientId, attachment) {
+  const current = await findPatientById(patientId);
+  if (!current) return null;
+  const attachments = [...(Array.isArray(current.attachments) ? current.attachments : []), attachment].slice(-50);
+  const nextRecord = { attachments };
+
+  if (!isPatientDbConnected()) {
+    memoryPatientRecords = memoryPatientRecords.map((record) => (
+      record.patientId === patientId
+        ? { ...record, ...nextRecord, updatedAt: new Date().toISOString() }
+        : record
+    ));
+    return memoryPatientRecords.find((record) => record.patientId === patientId);
+  }
+
+  return PatientRecord.findOneAndUpdate({ patientId }, nextRecord, { new: true }).lean();
+}
+
+async function removePatientAttachmentForAdmin(patientId, fileId) {
+  const current = await findPatientById(patientId);
+  if (!current) return null;
+  const attachments = (Array.isArray(current.attachments) ? current.attachments : [])
+    .filter((attachment) => attachment.fileId !== fileId);
+  if (attachments.length === (current.attachments || []).length) return current;
+  const nextRecord = { attachments };
+
+  if (!isPatientDbConnected()) {
+    memoryPatientRecords = memoryPatientRecords.map((record) => (
+      record.patientId === patientId
+        ? { ...record, ...nextRecord, updatedAt: new Date().toISOString() }
+        : record
+    ));
+    return memoryPatientRecords.find((record) => record.patientId === patientId);
+  }
+
+  return PatientRecord.findOneAndUpdate({ patientId }, nextRecord, { new: true }).lean();
+}
+
 function sanitizeActivity(body = {}, session = {}) {
   return {
     event: String(body.event || 'activity').slice(0, 80),
@@ -242,6 +280,17 @@ function toDashboardPatient(record) {
     country: record.country,
     status: record.status,
     dashboard: record.dashboard || {},
+    attachments: Array.isArray(record.attachments) ? record.attachments.map((attachment) => ({
+      fileId: attachment.fileId,
+      originalFilename: attachment.originalFilename,
+      extension: attachment.extension,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      category: attachment.category,
+      notes: attachment.notes,
+      uploadedBy: attachment.uploadedBy,
+      uploadedAt: attachment.uploadedAt,
+    })) : [],
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -539,6 +588,16 @@ export async function getPatientPrivateRecordForAdmin(patientId) {
 
 export async function updatePatientRecordForAdmin(patientId, updates) {
   const updated = await updatePatientDashboardForAdmin(patientId, updates);
+  return updated ? toDashboardPatient(updated) : null;
+}
+
+export async function addPatientAttachmentRecordForAdmin(patientId, attachment) {
+  const updated = await addPatientAttachmentForAdmin(patientId, attachment);
+  return updated ? toDashboardPatient(updated) : null;
+}
+
+export async function removePatientAttachmentRecordForAdmin(patientId, fileId) {
+  const updated = await removePatientAttachmentForAdmin(patientId, fileId);
   return updated ? toDashboardPatient(updated) : null;
 }
 

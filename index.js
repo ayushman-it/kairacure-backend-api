@@ -10,6 +10,7 @@ import inquiryRoutes from './routes/inquiries.js';
 import patientRoutes from './routes/patients.js';
 import treatmentRoutes from './routes/treatments.js';
 import doctorRoutes from './routes/doctors.js';
+import travelRoutes from './routes/travel.js';
 import { bootstrapDefaults } from './utils/bootstrapDefaults.js';
 
 const app = express();
@@ -45,7 +46,7 @@ app.use(cors({
     return callback(new Error(`CORS blocked origin: ${origin}`));
   },
 }));
-app.use(express.json());
+app.use(express.json({ limit: '12mb' }));
 
 app.get('/api/health', (_req, res) => {
   res.json({
@@ -64,6 +65,7 @@ app.use('/api/inquiries', inquiryRoutes);
 app.use('/api/patients', patientRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/ai-assistant', aiAssistantRoutes);
+app.use('/api/travel', travelRoutes);
 
 app.use((error, _req, res, _next) => {
   console.error(error);

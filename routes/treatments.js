@@ -30,13 +30,8 @@ function normalizeTreatmentRecord(item) {
 
 router.get('/', async (_req, res, next) => {
   try {
-    // DB offline → serve seed defaults directly
     if (mongoose.connection.readyState !== 1) {
-      const defaults = treatmentDefaults().map((item, index) => ({
-        ...normalizeTreatmentRecord(item),
-        _id: `default-treatment-${index + 1}`,
-      }));
-      return res.json(defaults);
+      return res.json([]);
     }
 
     const [treatments, adminTreatmentRecords] = await Promise.all([
@@ -66,16 +61,6 @@ router.get('/', async (_req, res, next) => {
       seen.add(key);
       return true;
     });
-
-    // If the DB has no real treatments yet, fall back to seed defaults so the
-    // planner is never empty on a fresh install.
-    if (merged.length === 0) {
-      const defaults = treatmentDefaults().map((item, index) => ({
-        ...normalizeTreatmentRecord(item),
-        _id: `default-treatment-${index + 1}`,
-      }));
-      return res.json(defaults);
-    }
 
     res.json(merged);
   } catch (error) {
