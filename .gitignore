@@ -56,3 +56,6 @@ data/db/
 *.tgz
 *.tar.gz
 !public/
+
+# CI/CD test files
+.cicd-test
