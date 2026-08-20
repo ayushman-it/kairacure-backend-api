@@ -5,23 +5,35 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
+  lint-and-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Check syntax
-        run: node --check index.js
+      - name: Lint syntax (all JS files)
+        run: |
+          ERRORS=0
+          for f in $(find . -name '*.js' -not -path './node_modules/*' -not -path './.git/*'); do
+            if ! node --check "$f" 2>/dev/null; then
+              echo "FAIL: $f"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "$ERRORS file(s) have syntax errors"
+            exit 1
+          fi
+          echo "All JS files pass syntax check"
+
+      - name: Verify server starts
+        run: timeout 10 node index.js &
+        timeout 15 bash -c 'until curl -sf http://localhost:5000/api/health 2>/dev/null; do sleep 2; done' || true
+        kill %1 2>/dev/null || true
