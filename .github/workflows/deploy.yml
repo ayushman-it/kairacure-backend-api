@@ -27,7 +27,7 @@ jobs:
       - name: Build artifact
         run: |
           npm ci --production
-          zip -r /tmp/backend.zip . -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" "data/*" ".env*" "node_modules/*" ".cicd-test" "*.md"
+          zip -r /tmp/backend.zip . -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" ".env*" "node_modules/*" ".cicd-test" "*.md"
 
       - name: Upload to S3
         run: |
