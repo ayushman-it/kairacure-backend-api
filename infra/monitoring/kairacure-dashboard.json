@@ -1,0 +1,88 @@
+{
+  "dashboard": {
+    "title": "Kairacure Production",
+    "tags": ["kairacure", "production"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "API Health",
+        "type": "stat",
+        "targets": [{
+          "metricName": "HealthyHostCount",
+          "namespace": "AWS/ApplicationELB",
+          "dimensions": {"LoadBalancer": "app/kairacure-api-alb/233d67efc30105ed"},
+          "stat": "Average"
+        }],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "title": "API Response Time",
+        "type": "timeseries",
+        "targets": [{
+          "metricName": "TargetResponseTime",
+          "namespace": "AWS/ApplicationELB",
+          "dimensions": {"LoadBalancer": "app/kairacure-api-alb/233d67efc30105ed"},
+          "stat": "Average"
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "title": "5xx Errors",
+        "type": "timeseries",
+        "targets": [{
+          "metricName": "HTTPCode_Target_5XX_Count",
+          "namespace": "AWS/ApplicationELB",
+          "dimensions": {"LoadBalancer": "app/kairacure-api-alb/233d67efc30105ed"},
+          "stat": "Sum"
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "title": "CPU Usage",
+        "type": "timeseries",
+        "targets": [{
+          "metricName": "cpu_usage_user",
+          "namespace": "Kairacure",
+          "dimensions": {"InstanceId": "i-048117c391049faa7"},
+          "stat": "Average"
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "targets": [{
+          "metricName": "mem_used_percent",
+          "namespace": "Kairacure",
+          "dimensions": {"InstanceId": "i-048117c391049faa7"},
+          "stat": "Average"
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "title": "Disk Usage",
+        "type": "gauge",
+        "targets": [{
+          "metricName": "disk_used_percent",
+          "namespace": "Kairacure",
+          "dimensions": {"InstanceId": "i-048117c391049faa7"},
+          "stat": "Average"
+        }],
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 20}
+      },
+      {
+        "title": "Request Count",
+        "type": "timeseries",
+        "targets": [{
+          "metricName": "RequestCount",
+          "namespace": "AWS/ApplicationELB",
+          "dimensions": {"LoadBalancer": "app/kairacure-api-alb/233d67efc30105ed"},
+          "stat": "Sum"
+        }],
+        "gridPos": {"h": 8, "w": 18, "x": 6, "y": 20}
+      }
+    ],
+    "time": {"from": "now-6h", "to": "now"},
+    "refresh": "30s"
+  }
+}

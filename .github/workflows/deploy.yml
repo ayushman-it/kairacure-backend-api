@@ -1,0 +1,148 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-south-1
+  EC2_INSTANCE: i-048117c391049faa7
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build artifact
+        run: |
+          npm ci --production
+          zip -r /tmp/backend.zip . -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" ".env*" "node_modules/*" ".cicd-test" "*.md"
+
+      - name: Upload to S3
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          aws s3 cp /tmp/backend.zip s3://kairacure-artifacts-prod/backend/${TIMESTAMP}.zip --region ${{ env.AWS_REGION }}
+          aws s3 cp /tmp/backend.zip s3://kairacure-artifacts-prod/backend/latest.zip --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to EC2
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --region ${{ env.AWS_REGION }} \
+            --instance-ids ${{ env.EC2_INSTANCE }} \
+            --document-name "AWS-RunShellScript" \
+            --timeout-seconds 300 \
+            --parameters 'commands=[
+              "cd /opt/kairacure",
+              "aws s3 cp s3://kairacure-artifacts-prod/backend/latest.zip /tmp/backend.zip --region ap-south-1",
+              "pm2 stop kairacure-api 2>/dev/null || true",
+              "rm -rf kairacure-backend-api",
+              "mkdir -p kairacure-backend-api",
+              "unzip -o /tmp/backend.zip -d kairacure-backend-api/",
+              "rm -f /tmp/backend.zip",
+              "cd kairacure-backend-api",
+              "aws s3 cp s3://kairacure-artifacts-prod/config/prod.env .env --region ap-south-1",
+              "npm ci --production 2>&1 | tail -5",
+              "pm2 start index.js --name kairacure-api --max-memory-restart 300M",
+              "pm2 save",
+              "sleep 15",
+              "for i in 1 2 3 4 5 6; do HEALTH=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5000/api/health 2>/dev/null || echo 000); if [ \"$HEALTH\" = \"200\" ]; then echo DEPLOY_SUCCESS; exit 0; fi; echo \"Health check $i: $HEALTH, retrying...\"; sleep 10; done; echo Health check failed; exit 1"
+            ]' \
+            --query 'Command.CommandId' --output text)
+          echo "SSM Command: $COMMAND_ID"
+          echo "Waiting for deployment (up to 5 minutes)..."
+          for i in $(seq 1 30); do
+            sleep 10
+            STATUS=$(aws ssm get-command-invocation \
+              --region ${{ env.AWS_REGION }} \
+              --command-id "$COMMAND_ID" \
+              --instance-id ${{ env.EC2_INSTANCE }} \
+              --query 'Status' --output text 2>/dev/null)
+            echo "  [$i] Status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              echo "Backend deployed successfully!"
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "Deploy failed:"
+              aws ssm get-command-invocation \
+                --region ${{ env.AWS_REGION }} \
+                --command-id "$COMMAND_ID" \
+                --instance-id ${{ env.EC2_INSTANCE }} \
+                --query 'StandardOutputContent' --output text 2>/dev/null | tail -30
+              exit 1
+            fi
+          done
+
+  deploy-web:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ayushman-it/kairacure-web
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build and deploy web
+        run: |
+          npm ci
+          npm run build
+          aws s3 sync dist/ s3://kairacure-web-prod/ --region ${{ env.AWS_REGION }} --delete
+
+  deploy-admin:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ayushman-it/kairacure-admin
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Build and deploy admin
+        run: |
+          npm ci
+          npm run build
+          aws s3 sync dist/ s3://kairacure-admin-prod/ --region ${{ env.AWS_REGION }} --delete
+
+  invalidate-cdn:
+    runs-on: ubuntu-latest
+    needs: [deploy-web, deploy-admin]
+    if: success()
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Invalidate CloudFront caches
+        run: |
+          WEB_DIST=$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='Kairacure Web'].Id" --output text --region ${{ env.AWS_REGION }} 2>/dev/null)
+          ADMIN_DIST=$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='Kairacure Admin'].Id" --output text --region ${{ env.AWS_REGION }} 2>/dev/null)
+          if [ -n "$WEB_DIST" ] && [ "$WEB_DIST" != "None" ]; then
+            aws cloudfront create-invalidation --distribution-id "$WEB_DIST" --paths "/*" --region ${{ env.AWS_REGION }}
+          fi
+          if [ -n "$ADMIN_DIST" ] && [ "$ADMIN_DIST" != "None" ]; then
+            aws cloudfront create-invalidation --distribution-id "$ADMIN_DIST" --paths "/*" --region ${{ env.AWS_REGION }}
+          fi
+          echo "CDN invalidation complete"

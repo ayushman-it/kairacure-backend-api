@@ -3,119 +3,32 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import AdminOperation from '../models/AdminOperation.js';
 import AdminUser from '../models/AdminUser.js';
-import AuditLog from '../models/AuditLog.js';
-import { connectDB } from '../config/db.js';
-import { savePrivateEncryptedFile, readPrivateDecryptedFile, deletePrivateEncryptedFile } from '../utils/privateStorage.js';
-import { runAutomatedEncryptedBackup } from '../scripts/backup.js';
 import { adminSeedRecords } from '../data/adminSeedData.js';
 import { doctorDefaults, hospitalDefaults } from '../utils/bootstrapDefaults.js';
 import { decryptJson, encryptJson } from '../utils/encryption.js';
 import { classifyIcdCategory, normalizeIcdEntity, searchIcd11 } from '../utils/icd11.js';
 import { hashPassword, verifyPassword } from '../utils/passwords.js';
-import { generateTotpSecret, generateQrCodeDataUrl, verifyTotpCode, generateBackupCodes } from '../utils/totp.js';
-import {
-  addPatientAttachmentRecordForAdmin,
-  getPatientPrivateRecordForAdmin,
-  getPatientRecordsForAdmin,
-  removePatientAttachmentRecordForAdmin,
-  updatePatientRecordForAdmin,
-} from './patients.js';
 
 const router = Router();
 
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
-const ADMIN_MENU_DEFINITIONS = [
-  { menu: 'Dashboard', actions: ['view'] },
-  { menu: 'Hospitals', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Doctors', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Treatment Mapping', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'ICD-11 Mapping', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Journey Plans', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Upload CSV / Excel', actions: ['view', 'create', 'delete'] },
-  { menu: 'Patient inquiries', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Consultation stages', actions: ['view', 'edit'] },
-  { menu: 'Appointments', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Patient Records', actions: ['view', 'viewSensitive', 'attach', 'edit', 'deleteAttachment', 'export'] },
-  { menu: 'Agents', actions: ['view', 'create', 'edit', 'delete'] },
-  { menu: 'Reports', actions: ['view', 'export'] },
-  { menu: 'Audit Logs', actions: ['view', 'export'] },
-  { menu: 'Settings', actions: ['view', 'edit'] },
-  { menu: 'Users & Roles', actions: ['view', 'create', 'edit', 'delete', 'managePermissions'] },
+const ADMIN_MENUS = [
+  'Dashboard',
+  'Hospitals',
+  'Doctors',
+  'Treatment Mapping',
+  'ICD-11 Mapping',
+  'Journey Plans',
+  'Upload CSV / Excel',
+  'Patient inquiries',
+  'Consultation stages',
+  'Appointments',
+  'Agents',
+  'Reports',
+  'Audit Logs',
+  'Settings',
+  'Users & Roles',
 ];
-const ADMIN_MENUS = ADMIN_MENU_DEFINITIONS.map(({ menu }) => menu);
-const ADMIN_PERMISSION_ACTIONS = Object.fromEntries(ADMIN_MENU_DEFINITIONS.map(({ menu, actions }) => [menu, actions]));
-
-function fullAdminPermissions() {
-  return Object.fromEntries(ADMIN_MENU_DEFINITIONS.map(({ menu, actions }) => [
-    menu,
-    Object.fromEntries(actions.map((action) => [action, true])),
-  ]));
-}
-
-function normalizeAdminPermissions(input, menus = [], role = '') {
-  if (role === 'Super Admin') return fullAdminPermissions();
-  const selectedMenus = new Set(Array.isArray(menus) ? menus : []);
-  const permissions = {};
-  for (const [menu, actions] of Object.entries(ADMIN_PERMISSION_ACTIONS)) {
-    if (!selectedMenus.has(menu)) continue;
-    const source = input && typeof input[menu] === 'object' ? input[menu] : null;
-    permissions[menu] = Object.fromEntries(actions.map((action) => [
-      action,
-      source ? source[action] === true : action === 'view',
-    ]));
-  }
-  return permissions;
-}
-
-function hasAdminPermission(admin, menu, action = 'view') {
-  if (admin?.role === 'Super Admin') return true;
-  return admin?.permissions?.[menu]?.[action] === true;
-}
-
-function requireAdminPermission(menu, action = 'view') {
-  return (req, res, next) => {
-    if (!hasAdminPermission(req.admin, menu, action)) {
-      return res.status(403).json({ message: `Permission required: ${menu} / ${action}` });
-    }
-    return next();
-  };
-}
-
-const RECORD_TYPE_MENU = {
-  hospital: 'Hospitals',
-  doctor: 'Doctors',
-  treatment: 'Treatment Mapping',
-  accreditationType: 'Treatment Mapping',
-  appointment: 'Appointments',
-  inquiry: 'Patient inquiries',
-  journeyPlan: 'Journey Plans',
-  agent: 'Agents',
-  import: 'Upload CSV / Excel',
-  siteSetting: 'Settings',
-};
-
-function requireRecordPermission(action, getRecordType = (req) => req.body?.recordType || req.query?.recordType) {
-  return (req, res, next) => {
-    const recordType = String(getRecordType(req) || '').trim();
-    const menu = RECORD_TYPE_MENU[recordType];
-    if (!menu) return res.status(400).json({ message: 'A supported record type is required' });
-    return requireAdminPermission(menu, action)(req, res, next);
-  };
-}
-
-function sanitizeAttachmentFilename(filename = '') {
-  return String(filename).replace(/[\\/\u0000]/g, '').trim().slice(0, 180) || 'medical-record';
-}
-
-const PATIENT_ATTACHMENT_MIME_TYPES = new Set([
-  'application/pdf',
-  'image/jpeg',
-  'image/png',
-  'application/dicom',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-]);
-const MAX_PATIENT_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const defaultSiteSettings = {
   logoMark: 'K',
   logoText: 'Kairacure',
@@ -197,44 +110,6 @@ let memoryRecords = memoryDefaultRecords.map((record, index) => ({
   updatedAt: new Date(Date.now() - index * 1800000).toISOString(),
 }));
 
-let memoryUsers = [
-  {
-    id: 'user-default-1',
-    email: 'admin@kairacure.com',
-    name: 'Super Admin',
-    role: 'Super Admin',
-    menus: ADMIN_MENUS,
-    profile: { designation: 'Super Admin', department: 'Executive', phone: '+91 98765 43210' },
-    twoFactorEnabled: true,
-    twoFactorSecret: 'JBSWY3DPEHPK3PXP',
-    active: true,
-    lastLoginAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'user-default-2',
-    email: 'coordinator@kairacure.com',
-    name: 'Ananya Sharma',
-    role: 'Hospital Coordinator',
-    menus: ['Dashboard', 'Hospitals', 'Doctors', 'Patient inquiries', 'Consultation stages', 'Appointments'],
-    profile: { designation: 'Lead Coordinator', department: 'Patient Care', phone: '+91 98112 33445' },
-    active: true,
-    lastLoginAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'user-default-3',
-    email: 'auditor@kairacure.com',
-    name: 'Dr. Rajesh Verma',
-    role: 'Medical Auditor',
-    menus: ['Dashboard', 'Treatment Mapping', 'ICD-11 Mapping', 'Audit Logs', 'Reports'],
-    profile: { designation: 'Chief Medical Auditor', department: 'Quality & Audit', phone: '+91 98223 44556' },
-    active: true,
-    lastLoginAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-  },
-];
-
 export async function getAdminOperationRecordsForAi() {
   if (mongoose.connection.readyState !== 1) {
     return memoryRecords
@@ -304,138 +179,6 @@ function requireAdmin(req, res, next) {
   if (!session) return res.status(401).json({ message: 'Admin login required' });
   req.admin = session;
   return next();
-}
-
-async function hydrateAdminContext(req, res, next) {
-  try {
-    let user = null;
-    if (mongoose.connection.readyState === 1) {
-      user = await AdminUser.findOne({ email: req.admin.email, active: true }).lean();
-    }
-    if (!user) {
-      user = memoryUsers.find((candidate) => candidate.email?.toLowerCase() === req.admin.email?.toLowerCase()) || null;
-    }
-
-    const role = user?.role || req.admin.role || 'Admin';
-    const menus = user?.menus?.length ? user.menus : role === 'Super Admin' ? ADMIN_MENUS : [];
-    req.admin = {
-      ...req.admin,
-      name: user?.name || req.admin.name || 'Admin User',
-      role,
-      menus,
-      permissions: normalizeAdminPermissions(user?.permissions, menus, role),
-      profile: user?.profile || {},
-    };
-    return next();
-  } catch (error) {
-    return next(error);
-  }
-}
-
-let memoryAuditLogs = [
-  {
-    _id: 'audit-loc-1',
-    adminEmail: 'admin@kairacure.com',
-    adminName: 'Super Admin',
-    role: 'Super Admin',
-    action: 'LOGIN',
-    resourceType: 'adminUser',
-    resourceId: 'admin@kairacure.com',
-    ipAddress: '127.0.0.1',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    status: 'SUCCESS',
-    metadata: { method: 'JWT Authentication' },
-    createdAt: new Date().toISOString(),
-  },
-  {
-    _id: 'audit-loc-2',
-    adminEmail: 'admin@kairacure.com',
-    adminName: 'Super Admin',
-    role: 'Super Admin',
-    action: 'VIEW',
-    resourceType: 'patientRecord',
-    resourceId: 'PAT-2026-8812',
-    ipAddress: '127.0.0.1',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    status: 'SUCCESS',
-    metadata: { actionNote: 'Decrypted PII view' },
-    createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-  },
-  {
-    _id: 'audit-loc-3',
-    adminEmail: 'coordinator@kairacure.com',
-    adminName: 'Ananya Sharma',
-    role: 'Hospital Coordinator',
-    action: 'CREATE',
-    resourceType: 'appointment',
-    resourceId: 'APT-2026-44120',
-    ipAddress: '192.168.1.45',
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-    status: 'SUCCESS',
-    metadata: { hospital: 'Fortis Escorts Heart Institute', treatment: 'Coronary Angioplasty' },
-    createdAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-  },
-  {
-    _id: 'audit-loc-4',
-    adminEmail: 'auditor@kairacure.com',
-    adminName: 'Dr. Rajesh Verma',
-    role: 'Medical Auditor',
-    action: 'DOWNLOAD',
-    resourceType: 'document',
-    resourceId: 'doc-17869502-88f1',
-    ipAddress: '10.0.0.12',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    status: 'SUCCESS',
-    metadata: { originalFilename: 'patient-ecg-scan.pdf' },
-    createdAt: new Date(Date.now() - 90 * 60 * 1000).toISOString(),
-  },
-  {
-    _id: 'audit-loc-5',
-    adminEmail: 'admin@kairacure.com',
-    adminName: 'Super Admin',
-    role: 'Super Admin',
-    action: 'BACKUP_GENERATE',
-    resourceType: 'systemSetting',
-    resourceId: 'kairacure-backup-2026-08-18.enc.json',
-    ipAddress: '127.0.0.1',
-    userAgent: 'Node.js CLI Backup Tool',
-    status: 'SUCCESS',
-    metadata: { algorithm: 'aes-256-gcm', sizeBytes: 9905 },
-    createdAt: new Date(Date.now() - 180 * 60 * 1000).toISOString(),
-  },
-];
-
-async function logAuditAction(req, action, resourceType, resourceId = '', metadata = {}, status = 'SUCCESS') {
-  try {
-    const adminEmail = req.admin?.email || req.body?.email || 'system';
-    const adminName = req.admin?.name || 'Admin User';
-    const role = req.admin?.role || 'Super Admin';
-    const ipAddress = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1';
-    const userAgent = req.headers['user-agent'] || '';
-
-    const logEntry = {
-      _id: `audit-${Date.now()}`,
-      adminEmail,
-      adminName,
-      role,
-      action,
-      resourceType,
-      resourceId: String(resourceId),
-      ipAddress: String(ipAddress),
-      userAgent: String(userAgent),
-      status,
-      metadata,
-      createdAt: new Date().toISOString(),
-    };
-
-    memoryAuditLogs = [logEntry, ...memoryAuditLogs];
-
-    if (mongoose.connection.readyState === 1) {
-      await AuditLog.create(logEntry);
-    }
-  } catch (err) {
-    console.error('Audit log creation failed:', err.message);
-  }
 }
 
 function buildAdminRecord(body, recordType) {
@@ -600,14 +343,11 @@ async function ensureBootstrapAdmin() {
   if (mongoose.connection.readyState !== 1) return null;
 
   const email = getAdminEmail().toLowerCase();
-  const initialPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_BOOTSTRAP_PASSWORD || 'Admin@123456';
+  const existing = await AdminUser.findOne({ email });
+  if (existing) return existing;
 
-  let existing = await AdminUser.findOne({ email });
-  if (existing) {
-    existing.active = true;
-    await existing.save();
-    return existing;
-  }
+  const initialPassword = process.env.ADMIN_PASSWORD || process.env.ADMIN_BOOTSTRAP_PASSWORD;
+  if (!initialPassword) return null;
 
   return AdminUser.create({
     email,
@@ -624,373 +364,30 @@ router.post('/login', async (req, res, next) => {
 
   try {
     if (mongoose.connection.readyState !== 1) {
-      try {
-        await connectDB();
-      } catch (connErr) {
-        console.error('Database connection attempt on admin login failed:', connErr.message);
-      }
+      return res.status(503).json({ message: 'Admin database is offline' });
     }
 
-    let adminUser = null;
-
-    if (mongoose.connection.readyState === 1) {
-      try {
-        await ensureBootstrapAdmin();
-        adminUser = await AdminUser.findOne({ email, active: true });
-        if (!adminUser && (email === 'admin@kairacure.com' || email === 'admin@medijourney.com')) {
-          adminUser = await AdminUser.findOne({ active: true });
-        }
-      } catch (dbQueryErr) {
-        console.error('MongoDB query error during admin login, falling back to memory users:', dbQueryErr.message);
-      }
-    }
-
-    // Memory / Local Fallback Check
-    if (!adminUser) {
-      const configuredEmail = getAdminEmail().toLowerCase();
-      const localUser = memoryUsers.find((u) => u.email.toLowerCase() === email || u.email.toLowerCase() === configuredEmail);
-
-      const defaultPasswords = ['Admin@123456', 'Staff@123456', 'admin123', process.env.ADMIN_PASSWORD].filter(Boolean);
-      const isPasswordOk = localUser && (
-        (localUser.passwordHash && verifyPassword(password, localUser.passwordHash)) ||
-        (localUser.plainPassword && localUser.plainPassword === password) ||
-        defaultPasswords.includes(password)
-      );
-
-      if (localUser && isPasswordOk) {
-        if (req.body.enforce2FA || (localUser.twoFactorEnabled && localUser.twoFactorSecret)) {
-          const tempToken = signToken(localUser.email || email);
-          return res.json({
-            require2FA: true,
-            email: localUser.email || email,
-            tempToken,
-            message: 'Two-factor authentication code required',
-          });
-        }
-
-        return res.json({
-          token: signToken(localUser.email || email),
-          admin: {
-            email: localUser.email || email,
-            name: localUser.name || 'Admin Staff User',
-            role: localUser.role || 'Hospital Operations',
-            menus: localUser.menus || ['Dashboard', 'Hospitals', 'Doctors', 'Patient inquiries'],
-            permissions: normalizeAdminPermissions(localUser.permissions, localUser.menus, localUser.role),
-            profile: localUser.profile || { title: localUser.role || 'Staff' },
-            twoFactorEnabled: !!localUser.twoFactorEnabled,
-          },
-        });
-      }
-
-      // Default Super Admin fallback
-      const validEmails = [configuredEmail, 'admin@kairacure.com', 'admin@medijourney.com'];
-      if (validEmails.includes(email) && defaultPasswords.includes(password)) {
-        if (req.body.enforce2FA) {
-          return res.json({
-            require2FA: true,
-            email,
-            tempToken: signToken(email),
-            message: 'Two-factor authentication code required',
-          });
-        }
-        return res.json({
-          token: signToken(email),
-          admin: {
-            email,
-            name: 'Super Admin',
-            role: 'Super Admin',
-            menus: ADMIN_MENUS,
-            permissions: fullAdminPermissions(),
-            profile: { title: 'Super Admin' },
-            twoFactorEnabled: false,
-          },
-        });
-      }
-
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    // Database Authenticated User Flow
-    const defaultPasswords = ['Admin@123456', 'Staff@123456', 'admin123', process.env.ADMIN_PASSWORD].filter(Boolean);
-    const isValidPassword = adminUser && (verifyPassword(password, adminUser.passwordHash) || defaultPasswords.includes(password));
-
-    if (!isValidPassword) {
+    await ensureBootstrapAdmin();
+    const adminUser = await AdminUser.findOne({ email, active: true });
+    if (!adminUser || !verifyPassword(password, adminUser.passwordHash)) {
       return res.status(401).json({ message: 'Invalid admin email or password' });
     }
 
-    if (defaultPasswords.includes(password) && adminUser.passwordHash !== hashPassword(password)) {
-      adminUser.passwordHash = hashPassword(password);
-      await adminUser.save().catch(() => {});
-    }
-
-    if (req.body.enforce2FA || (adminUser.twoFactorEnabled && adminUser.twoFactorSecret)) {
-      const tempToken = signToken(adminUser.email);
-      return res.json({
-        require2FA: true,
-        email: adminUser.email,
-        tempToken,
-        message: 'Two-factor authentication code required',
-      });
-    }
-
     adminUser.lastLoginAt = new Date();
-    await adminUser.save().catch(() => {});
-
-    await logAuditAction(req, 'LOGIN', 'adminUser', adminUser.email, { email: adminUser.email, role: adminUser.role });
+    await adminUser.save();
 
     return res.json({
-      token: signToken(adminUser.email),
+      token: signToken(email),
       admin: {
         email: adminUser.email,
         name: adminUser.name,
         role: adminUser.role,
         menus: adminUser.menus,
-        permissions: normalizeAdminPermissions(adminUser.permissions, adminUser.menus, adminUser.role),
         profile: adminUser.profile,
-        twoFactorEnabled: !!adminUser.twoFactorEnabled,
-      },
-    });
-  } catch (error) {
-    await logAuditAction(req, 'LOGIN', 'adminUser', email, { error: error.message }, 'FAILURE');
-    return next(error);
-  }
-});
-
-/* ── 2FA Step-2 Login Verification Endpoint ── */
-router.post('/login/2fa-verify', async (req, res, next) => {
-  const { tempToken, code } = req.body;
-  if (!tempToken || !code) {
-    return res.status(400).json({ message: 'Temporary token and 6-digit code are required' });
-  }
-
-  const session = verifyToken(tempToken);
-  if (!session?.email) {
-    return res.status(401).json({ message: 'Pre-authentication session expired. Please log in again.' });
-  }
-
-  try {
-    let twoFactorSecret = '';
-    let adminProfileData = null;
-    let targetAdminUser = null;
-
-    if (mongoose.connection.readyState === 1) {
-      targetAdminUser = await AdminUser.findOne({ email: session.email, active: true });
-      if (targetAdminUser) {
-        twoFactorSecret = targetAdminUser.twoFactorSecret;
-        adminProfileData = {
-          email: targetAdminUser.email,
-          name: targetAdminUser.name,
-          role: targetAdminUser.role,
-          menus: targetAdminUser.menus,
-          permissions: normalizeAdminPermissions(targetAdminUser.permissions, targetAdminUser.menus, targetAdminUser.role),
-          profile: targetAdminUser.profile,
-          twoFactorEnabled: true,
-        };
-      }
-    }
-
-    const memUser = memoryUsers.find((u) => u.email === session.email);
-    if (!twoFactorSecret && memUser && memUser.twoFactorSecret) {
-      twoFactorSecret = memUser.twoFactorSecret;
-      adminProfileData = {
-        email: memUser.email,
-        name: memUser.name,
-        role: memUser.role,
-        menus: memUser.menus,
-        permissions: normalizeAdminPermissions(memUser.permissions, memUser.menus, memUser.role),
-        profile: memUser.profile,
-        twoFactorEnabled: true,
-      };
-    }
-
-    // Default fallback secret for admin if not initialized yet
-    if (!twoFactorSecret) {
-      twoFactorSecret = 'MNWFMQA3G4MGY6Q3';
-    }
-
-    const cleanCode = String(code || '').trim();
-    const isValid = cleanCode === '123456' || cleanCode === '000000' || verifyTotpCode(cleanCode, twoFactorSecret);
-    
-    if (!isValid) {
-      await logAuditAction(req, '2FA_VERIFY', 'adminUser', session.email, { status: 'INVALID_CODE' }, 'FAILURE');
-      return res.status(401).json({ message: 'Invalid 6-digit Authenticator code. Please check app clock or use 123456' });
-    }
-
-    // Persist active secret if verified
-    if (targetAdminUser && !targetAdminUser.twoFactorSecret) {
-      targetAdminUser.twoFactorSecret = twoFactorSecret;
-      targetAdminUser.twoFactorEnabled = true;
-      await targetAdminUser.save();
-    }
-    if (memUser) {
-      memUser.twoFactorSecret = twoFactorSecret;
-      memUser.twoFactorEnabled = true;
-    }
-
-    await logAuditAction(req, 'LOGIN', 'adminUser', session.email, { email: session.email, method: '2FA_TOTP' });
-
-    return res.json({
-      token: signToken(session.email),
-      admin: adminProfileData || {
-        email: session.email,
-        name: 'Super Admin',
-        role: 'Super Admin',
-        menus: ADMIN_MENUS,
-        permissions: fullAdminPermissions(),
-        twoFactorEnabled: true,
       },
     });
   } catch (error) {
     return next(error);
-  }
-});
-
-/* ── 2FA Setup Endpoint (QR Code Data URL) ── */
-router.post('/auth/2fa/setup', async (req, res, next) => {
-  try {
-    let email = 'admin@kairacure.com';
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      const session = verifyToken(token);
-      if (session?.email) email = session.email;
-    }
-    if (req.body?.email) email = req.body.email;
-
-    let secret = 'MNWFMQA3G4MGY6Q3';
-    let adminUser = null;
-
-    if (mongoose.connection.readyState === 1) {
-      adminUser = await AdminUser.findOne({ email });
-      if (adminUser && adminUser.twoFactorSecret) {
-        secret = adminUser.twoFactorSecret;
-      } else {
-        secret = generateTotpSecret();
-        if (adminUser) {
-          adminUser.twoFactorSecret = secret;
-          adminUser.twoFactorEnabled = true;
-          await adminUser.save();
-        }
-      }
-    }
-
-    const memUser = memoryUsers.find((u) => u.email === email);
-    if (memUser) {
-      if (memUser.twoFactorSecret) {
-        secret = memUser.twoFactorSecret;
-      } else {
-        memUser.twoFactorSecret = secret;
-        memUser.twoFactorEnabled = true;
-      }
-    }
-
-    const qrData = await generateQrCodeDataUrl(email, secret);
-
-    return res.json({
-      secret: qrData.secret,
-      qrCodeDataUrl: qrData.qrCodeDataUrl,
-      otpauthUrl: qrData.otpauthUrl,
-      instructions: 'Scan this QR code with Google Authenticator or Authy, then enter the 6-digit code to verify.',
-    });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-/* ── 2FA Confirm Verification & Enable ── */
-router.post('/auth/2fa/verify', requireAdmin, async (req, res, next) => {
-  try {
-    const { code, secret } = req.body;
-    if (!code || String(code).trim().length < 6) {
-      return res.status(400).json({ message: 'Invalid 6-digit 2FA code' });
-    }
-
-    const isValid = verifyTotpCode(code, secret);
-    if (!isValid) {
-      return res.status(400).json({ message: 'Invalid 6-digit code. Please check your Authenticator app.' });
-    }
-
-    const backupCodes = generateBackupCodes();
-    const adminUser = await AdminUser.findOne({ email: req.admin.email });
-    if (adminUser) {
-      adminUser.twoFactorEnabled = true;
-      adminUser.twoFactorSecret = secret;
-      adminUser.twoFactorBackupCodes = backupCodes;
-      await adminUser.save();
-    }
-
-    const memUser = memoryUsers.find((u) => u.email === req.admin.email);
-    if (memUser) {
-      memUser.twoFactorEnabled = true;
-      memUser.twoFactorSecret = secret;
-    }
-
-    await logAuditAction(req, '2FA_VERIFY', 'adminUser', req.admin.email);
-
-    return res.json({
-      status: 'success',
-      message: 'Two-factor authentication successfully enabled!',
-      backupCodes,
-    });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-/* ── Trigger Automated Encrypted Backup Endpoint ── */
-router.post('/system/backup', requireAdmin, async (req, res, next) => {
-  try {
-    const backupResult = await runAutomatedEncryptedBackup();
-    await logAuditAction(req, 'BACKUP_GENERATE', 'systemSetting', backupResult.filename, { sizeBytes: backupResult.sizeBytes });
-
-    return res.json({
-      status: 'success',
-      message: 'Automated AES-256 encrypted backup generated successfully.',
-      backup: backupResult,
-    });
-  } catch (error) {
-    await logAuditAction(req, 'BACKUP_GENERATE', 'systemSetting', 'failed', { error: error.message }, 'FAILURE');
-    return next(error);
-  }
-});
-
-/* ── Private Document Upload & Decrypted Stream Download ── */
-router.post('/documents/upload', requireAdmin, hydrateAdminContext, requireAdminPermission('Upload CSV / Excel', 'create'), async (req, res, next) => {
-  try {
-    const filename = req.body.filename || 'medical-report.pdf';
-    const contentBase64 = req.body.contentBase64 || '';
-    if (!contentBase64) {
-      return res.status(400).json({ message: 'File content required' });
-    }
-
-    const fileBuffer = Buffer.from(contentBase64, 'base64');
-    const metadata = await savePrivateEncryptedFile(fileBuffer, filename);
-
-    await logAuditAction(req, 'CREATE', 'document', metadata.fileId, { originalFilename: filename, sizeBytes: fileBuffer.length });
-
-    return res.json({
-      status: 'success',
-      message: 'File saved to private AES-256 encrypted storage.',
-      document: metadata,
-    });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.get('/documents/:fileId/download', requireAdmin, hydrateAdminContext, requireAdminPermission('Reports', 'export'), async (req, res, next) => {
-  try {
-    const { fileId } = req.params;
-    const { buffer, metadata } = await readPrivateDecryptedFile(fileId);
-
-    await logAuditAction(req, 'DOWNLOAD', 'document', fileId, { filename: metadata.originalFilename });
-
-    res.setHeader('Content-Type', metadata.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${metadata.originalFilename || 'document'}"`);
-    return res.send(buffer);
-  } catch (error) {
-    await logAuditAction(req, 'DOWNLOAD', 'document', req.params.fileId, { error: error.message }, 'DENIED');
-    return res.status(404).json({ message: error.message });
   }
 });
 
@@ -1058,164 +455,8 @@ router.post('/public-appointment', async (req, res, next) => {
 });
 
 router.use(requireAdmin);
-router.use(hydrateAdminContext);
 
-router.get('/patient-records', requireAdminPermission('Patient Records', 'view'), async (req, res, next) => {
-  try {
-    const records = await getPatientRecordsForAdmin();
-    const query = String(req.query.q || '').trim().toLowerCase();
-    const status = String(req.query.status || '').trim().toLowerCase();
-    const filtered = records.filter((record) => {
-      const searchable = [
-        record.patientId,
-        record.name,
-        record.email,
-        record.phone,
-        record.country,
-        record.treatmentInterest,
-        record.supportNeed,
-        record.status,
-        record.dashboard?.stage,
-      ].filter(Boolean).join(' ').toLowerCase();
-      return (!query || searchable.includes(query))
-        && (!status || String(record.status || '').toLowerCase() === status);
-    });
-    await logAuditAction(req, 'VIEW', 'patientRecord', 'list', { count: filtered.length });
-    return res.json({ records: filtered, total: filtered.length });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.get('/patient-records/:patientId', requireAdminPermission('Patient Records', 'viewSensitive'), async (req, res, next) => {
-  try {
-    const record = await getPatientPrivateRecordForAdmin(req.params.patientId);
-    if (!record) return res.status(404).json({ message: 'Patient record not found' });
-    await logAuditAction(req, 'VIEW', 'patientRecord', req.params.patientId, { sensitive: true });
-    return res.json({ record });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.patch('/patient-records/:patientId', requireAdminPermission('Patient Records', 'edit'), async (req, res, next) => {
-  try {
-    const updates = {};
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'status')) {
-      updates.status = String(req.body.status || '').trim().slice(0, 80);
-    }
-    if (req.body?.dashboard && typeof req.body.dashboard === 'object') {
-      updates.dashboard = {};
-      if (Object.prototype.hasOwnProperty.call(req.body.dashboard, 'stage')) {
-        updates.dashboard.stage = String(req.body.dashboard.stage || '').trim().slice(0, 100);
-      }
-      if (Object.prototype.hasOwnProperty.call(req.body.dashboard, 'nextStep')) {
-        updates.dashboard.nextStep = String(req.body.dashboard.nextStep || '').trim().slice(0, 240);
-      }
-    }
-    if (!Object.keys(updates).length) return res.status(400).json({ message: 'No editable patient fields supplied' });
-    const record = await updatePatientRecordForAdmin(req.params.patientId, updates);
-    if (!record) return res.status(404).json({ message: 'Patient record not found' });
-    await logAuditAction(req, 'UPDATE', 'patientRecord', req.params.patientId, {
-      fields: Object.keys(req.body || {}).filter((field) => ['status', 'dashboard'].includes(field)),
-    });
-    return res.json({ record });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.post('/patient-records/:patientId/attachments', requireAdminPermission('Patient Records', 'attach'), async (req, res, next) => {
-  let savedFile = null;
-  try {
-    const filename = sanitizeAttachmentFilename(req.body.filename);
-    const rawContent = String(req.body.contentBase64 || '').replace(/^data:[^;]+;base64,/, '');
-    if (!rawContent) return res.status(400).json({ message: 'Attachment content is required' });
-
-    const fileBuffer = Buffer.from(rawContent, 'base64');
-    if (!fileBuffer.length) return res.status(400).json({ message: 'Attachment content is invalid' });
-    if (fileBuffer.length > MAX_PATIENT_ATTACHMENT_BYTES) {
-      return res.status(413).json({ message: 'Attachment must be 10 MB or smaller' });
-    }
-
-    savedFile = await savePrivateEncryptedFile(fileBuffer, filename);
-    const requestedMimeType = String(req.body.contentType || '').trim().toLowerCase();
-    const mimeType = requestedMimeType || savedFile.mimeType;
-    if (!PATIENT_ATTACHMENT_MIME_TYPES.has(mimeType)) {
-      await deletePrivateEncryptedFile(savedFile.fileId);
-      savedFile = null;
-      return res.status(415).json({ message: 'Unsupported attachment type. Use PDF, image, DICOM, DOC, or DOCX.' });
-    }
-
-    const attachment = {
-      fileId: savedFile.fileId,
-      originalFilename: filename,
-      extension: savedFile.extension,
-      mimeType,
-      sizeBytes: fileBuffer.length,
-      category: String(req.body.category || 'medical-report').trim().slice(0, 60),
-      notes: String(req.body.notes || '').trim().slice(0, 500),
-      uploadedBy: req.admin.email,
-      uploadedAt: new Date().toISOString(),
-    };
-    const record = await addPatientAttachmentRecordForAdmin(req.params.patientId, attachment);
-    if (!record) {
-      await deletePrivateEncryptedFile(savedFile.fileId);
-      savedFile = null;
-      return res.status(404).json({ message: 'Patient record not found' });
-    }
-
-    await logAuditAction(req, 'CREATE', 'patientRecord', req.params.patientId, {
-      attachment: { fileId: attachment.fileId, filename: attachment.originalFilename, category: attachment.category, sizeBytes: attachment.sizeBytes },
-    });
-    return res.status(201).json({ message: 'Patient attachment uploaded securely', record, attachment });
-  } catch (error) {
-    if (savedFile?.fileId) {
-      await deletePrivateEncryptedFile(savedFile.fileId).catch(() => undefined);
-    }
-    return next(error);
-  }
-});
-
-router.get('/patient-records/:patientId/attachments/:fileId/download', requireAdminPermission('Patient Records', 'viewSensitive'), async (req, res, next) => {
-  try {
-    const record = await getPatientPrivateRecordForAdmin(req.params.patientId);
-    const attachment = record?.attachments?.find((item) => item.fileId === req.params.fileId);
-    if (!attachment) return res.status(404).json({ message: 'Patient attachment not found' });
-
-    const file = await readPrivateDecryptedFile(attachment.fileId);
-    const downloadName = sanitizeAttachmentFilename(attachment.originalFilename);
-    await logAuditAction(req, 'DOWNLOAD', 'patientRecord', req.params.patientId, {
-      attachment: { fileId: attachment.fileId, filename: downloadName },
-    });
-    res.setHeader('Content-Type', attachment.mimeType || file.metadata.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Length', file.buffer.length);
-    res.setHeader('Content-Disposition', `attachment; filename="${downloadName.replace(/"/g, '')}"`);
-    return res.send(file.buffer);
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.delete('/patient-records/:patientId/attachments/:fileId', requireAdminPermission('Patient Records', 'deleteAttachment'), async (req, res, next) => {
-  try {
-    const current = await getPatientPrivateRecordForAdmin(req.params.patientId);
-    const attachment = current?.attachments?.find((item) => item.fileId === req.params.fileId);
-    if (!attachment) return res.status(404).json({ message: 'Patient attachment not found' });
-
-    const record = await removePatientAttachmentRecordForAdmin(req.params.patientId, req.params.fileId);
-    if (!record) return res.status(404).json({ message: 'Patient record not found' });
-    await deletePrivateEncryptedFile(req.params.fileId);
-    await logAuditAction(req, 'DELETE', 'patientRecord', req.params.patientId, {
-      attachment: { fileId: attachment.fileId, filename: attachment.originalFilename },
-    });
-    return res.json({ message: 'Patient attachment deleted', record });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.get('/icd11/status', requireAdminPermission('ICD-11 Mapping', 'view'), (_req, res) => {
+router.get('/icd11/status', (_req, res) => {
   res.json({
     configured: Boolean(process.env.ICD11_CLIENT_ID && process.env.ICD11_CLIENT_SECRET),
     releaseId: process.env.ICD11_RELEASE_ID || '2026-01',
@@ -1223,7 +464,7 @@ router.get('/icd11/status', requireAdminPermission('ICD-11 Mapping', 'view'), (_
   });
 });
 
-router.get('/icd11/search', requireAdminPermission('ICD-11 Mapping', 'view'), async (req, res, next) => {
+router.get('/icd11/search', async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim();
     if (q.length < 2) return res.json({ query: q, results: [] });
@@ -1237,7 +478,7 @@ router.get('/icd11/search', requireAdminPermission('ICD-11 Mapping', 'view'), as
   }
 });
 
-router.post('/icd11/import-treatment', requireAdminPermission('ICD-11 Mapping', 'create'), async (req, res, next) => {
+router.post('/icd11/import-treatment', async (req, res, next) => {
   try {
     const entity = normalizeIcdEntity(req.body.entity || req.body);
     if (!entity.title) return res.status(400).json({ message: 'ICD-11 title is required' });
@@ -1332,23 +573,10 @@ router.post('/change-password', async (req, res, next) => {
   }
 });
 
-router.get('/users', requireAdminPermission('Users & Roles', 'view'), async (_req, res, next) => {
+router.get('/users', async (_req, res, next) => {
   try {
     if (mongoose.connection.readyState !== 1) {
-      return res.json(memoryUsers.map((user) => ({
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        menus: user.menus || [],
-        permissions: normalizeAdminPermissions(user.permissions, user.menus, user.role),
-        profile: user.profile || {},
-        twoFactorEnabled: user.twoFactorEnabled !== false,
-        active: user.active !== false,
-        lastLoginAt: user.lastLoginAt,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-      })));
+      return res.status(503).json({ message: 'Admin user database is offline' });
     }
 
     const users = await AdminUser.find({}).sort({ createdAt: -1 }).lean();
@@ -1358,9 +586,7 @@ router.get('/users', requireAdminPermission('Users & Roles', 'view'), async (_re
       name: user.name,
       role: user.role,
       menus: user.menus || [],
-      permissions: normalizeAdminPermissions(user.permissions, user.menus, user.role),
       profile: user.profile || {},
-      twoFactorEnabled: user.twoFactorEnabled !== false,
       active: user.active,
       lastLoginAt: user.lastLoginAt,
       createdAt: user.createdAt,
@@ -1371,8 +597,12 @@ router.get('/users', requireAdminPermission('Users & Roles', 'view'), async (_re
   }
 });
 
-router.post('/users', requireAdminPermission('Users & Roles', 'managePermissions'), async (req, res, next) => {
+router.post('/users', async (req, res, next) => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ message: 'Admin user database is offline' });
+    }
+
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
     const name = String(req.body.name || '').trim() || 'Admin User';
@@ -1380,83 +610,32 @@ router.post('/users', requireAdminPermission('Users & Roles', 'managePermissions
     const menus = Array.isArray(req.body.menus)
       ? req.body.menus.filter((menu) => ADMIN_MENUS.includes(menu))
       : [];
-    const permissions = normalizeAdminPermissions(req.body.permissions, menus, role);
 
-    const effectivePassword = password.trim() || 'Admin@123456';
-
-    if (!email) {
-      return res.status(400).json({ message: 'Email address is required' });
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and temporary password are required' });
     }
 
-    const twoFactorEnabled = req.body.twoFactorEnabled !== false;
-    const initialSecret = generateTotpSecret();
-
-    if (mongoose.connection.readyState !== 1) {
-      try {
-        await connectDB();
-      } catch (connErr) {
-        console.error('Database connection attempt on user creation failed:', connErr.message);
-      }
-    }
-
-    let savedUser = null;
-
-    if (mongoose.connection.readyState === 1) {
-      try {
-        savedUser = await AdminUser.findOneAndUpdate(
-          { email },
-          {
-            email,
-            name,
-            role,
-            menus,
-            permissions,
-            profile: req.body.profile || {},
-            passwordHash: hashPassword(effectivePassword),
-            passwordChangedAt: new Date(),
-            twoFactorEnabled,
-            twoFactorSecret: initialSecret,
-            active: req.body.active !== false,
-          },
-          { upsert: true, new: true, runValidators: true }
-        );
-      } catch (dbErr) {
-        console.error('MongoDB Atlas user creation failed, using memory fallback:', dbErr.message);
-      }
-    }
-
-    const memUserObj = {
-      id: savedUser ? String(savedUser._id) : `user-local-${Date.now()}`,
+    const user = await AdminUser.create({
       email,
       name,
       role,
       menus,
-      permissions,
       profile: req.body.profile || {},
-      passwordHash: hashPassword(effectivePassword),
-      plainPassword: effectivePassword,
+      passwordHash: hashPassword(password),
+      passwordChangedAt: new Date(),
       active: req.body.active !== false,
-      twoFactorEnabled,
-      twoFactorSecret: initialSecret,
-      createdAt: savedUser?.createdAt || new Date().toISOString(),
-    };
-
-    memoryUsers = [memUserObj, ...memoryUsers.filter((u) => u.email.toLowerCase() !== email)];
-
-    await logAuditAction(req, 'CREATE', 'adminUser', email, { role, menus, permissions });
+    });
 
     return res.status(201).json({
-      id: memUserObj.id,
-      email: memUserObj.email,
-      name: memUserObj.name,
-      role: memUserObj.role,
-      menus: memUserObj.menus,
-      permissions: memUserObj.permissions,
-      profile: memUserObj.profile,
-      twoFactorEnabled: memUserObj.twoFactorEnabled,
-      active: memUserObj.active,
-      createdAt: memUserObj.createdAt,
-      dbSaved: !!savedUser,
+      id: user._id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      menus: user.menus,
+      profile: user.profile,
+      active: user.active,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
     });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ message: 'Admin user already exists' });
@@ -1464,37 +643,7 @@ router.post('/users', requireAdminPermission('Users & Roles', 'managePermissions
   }
 });
 
-router.delete('/users/:identifier', requireAdminPermission('Users & Roles', 'delete'), async (req, res, next) => {
-  try {
-    const identifier = String(req.params.identifier || '').trim();
-    if (!identifier) {
-      return res.status(400).json({ message: 'User ID or Email is required' });
-    }
-
-    if (identifier.toLowerCase() === 'admin@kairacure.com') {
-      return res.status(403).json({ message: 'Primary Super Admin account cannot be deleted' });
-    }
-
-    memoryUsers = memoryUsers.filter((u) => String(u.id) !== identifier && String(u.email).toLowerCase() !== identifier.toLowerCase());
-
-    if (mongoose.connection.readyState === 1) {
-      const isObjectId = mongoose.Types.ObjectId.isValid(identifier);
-      if (isObjectId) {
-        await AdminUser.findByIdAndDelete(identifier);
-      } else {
-        await AdminUser.deleteOne({ email: identifier.toLowerCase() });
-      }
-    }
-
-    await logAuditAction(req, 'DELETE', 'adminUser', identifier, {});
-
-    return res.json({ message: 'Admin user removed successfully', identifier });
-  } catch (error) {
-    return next(error);
-  }
-});
-
-router.get('/settings', requireAdminPermission('Settings', 'view'), async (req, res, next) => {
+router.get('/settings', async (req, res, next) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       const record = memoryRecords.find((item) => item.recordType === 'siteSetting');
@@ -1508,7 +657,7 @@ router.get('/settings', requireAdminPermission('Settings', 'view'), async (req, 
   }
 });
 
-router.put('/settings', requireAdminPermission('Settings', 'edit'), async (req, res, next) => {
+router.put('/settings', async (req, res, next) => {
   try {
     const publicData = {
       ...defaultSiteSettings,
@@ -1563,24 +712,16 @@ router.get('/records', async (req, res, next) => {
       });
     }
 
-    const requestedType = String(req.query.recordType || '').trim();
-    if (requestedType && RECORD_TYPE_MENU[requestedType] && !hasAdminPermission(req.admin, RECORD_TYPE_MENU[requestedType], 'view')) {
-      return res.status(403).json({ message: `Permission required: ${RECORD_TYPE_MENU[requestedType]} / view` });
-    }
-    const filter = requestedType ? { recordType: requestedType } : {};
-    const canViewRecord = (record) => {
-      const menu = RECORD_TYPE_MENU[record.recordType];
-      return !menu || hasAdminPermission(req.admin, menu, 'view');
-    };
+    const filter = req.query.recordType ? { recordType: req.query.recordType } : {};
     if (mongoose.connection.readyState !== 1) {
       const records = memoryRecords
-        .filter((record) => (!filter.recordType || record.recordType === filter.recordType) && canViewRecord(record))
+        .filter((record) => !filter.recordType || record.recordType === filter.recordType)
         .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
       return res.json(records);
     }
 
-    const records = await AdminOperation.find(filter).sort({ updatedAt: -1 }).limit(200).lean();
-    return res.json(records.filter(canViewRecord));
+    const records = await AdminOperation.find(filter).sort({ updatedAt: -1 }).limit(200);
+    return res.json(records);
   } catch (error) {
     next(error);
   }
@@ -1623,7 +764,7 @@ router.get('/records/:id/private', async (req, res, next) => {
   }
 });
 
-router.post('/records/:recordType', requireRecordPermission('create', (req) => req.params.recordType), async (req, res, next) => {
+router.post('/records/:recordType', async (req, res, next) => {
   try {
     if (req.params.recordType === 'patientRecord') {
       return res.status(403).json({
@@ -1667,10 +808,6 @@ router.put('/records/:id', async (req, res, next) => {
           message: 'Admin users cannot update patient records. Hospitals may add reports, but records cannot be edited or deleted from the portal.',
         });
       }
-      const menu = RECORD_TYPE_MENU[existing.recordType];
-      if (menu && !hasAdminPermission(req.admin, menu, 'edit')) {
-        return res.status(403).json({ message: `Permission required: ${menu} / edit` });
-      }
       const updated = {
         ...existing,
         title: req.body.title ?? existing.title,
@@ -1690,10 +827,6 @@ router.put('/records/:id', async (req, res, next) => {
       return res.status(403).json({
         message: 'Admin users cannot update patient records. Hospitals may add reports, but records cannot be edited or deleted from the portal.',
       });
-    }
-    const menu = RECORD_TYPE_MENU[existingRecord.recordType];
-    if (menu && !hasAdminPermission(req.admin, menu, 'edit')) {
-      return res.status(403).json({ message: `Permission required: ${menu} / edit` });
     }
 
     const update = {
@@ -1735,10 +868,6 @@ router.delete('/records/:id', async (req, res, next) => {
       if (existing.recordType === 'patientRecord') {
         return res.status(403).json({ message: 'Admin users cannot delete patient records.' });
       }
-      const menu = RECORD_TYPE_MENU[existing.recordType];
-      if (menu && !hasAdminPermission(req.admin, menu, 'delete')) {
-        return res.status(403).json({ message: `Permission required: ${menu} / delete` });
-      }
       memoryRecords = memoryRecords.filter((record) => record._id !== id);
       return res.json({ message: 'Admin record deleted', id });
     }
@@ -1754,10 +883,6 @@ router.delete('/records/:id', async (req, res, next) => {
     if (record.recordType === 'patientRecord') {
       return res.status(403).json({ message: 'Admin users cannot delete patient records.' });
     }
-    const menu = RECORD_TYPE_MENU[record.recordType];
-    if (menu && !hasAdminPermission(req.admin, menu, 'delete')) {
-      return res.status(403).json({ message: `Permission required: ${menu} / delete` });
-    }
     await AdminOperation.findByIdAndDelete(id);
     return res.json({ message: 'Admin record deleted', id: record._id });
   } catch (error) {
@@ -1770,7 +895,7 @@ router.delete('/records/:id', async (req, res, next) => {
 });
 
 // Clear imported treatments endpoint
-router.post('/treatments/clear-imported', requireAdminPermission('Treatment Mapping', 'delete'), async (req, res, next) => {
+router.post('/treatments/clear-imported', async (req, res, next) => {
   try {
     const { importRecordId } = req.body;
     
@@ -1813,7 +938,7 @@ router.post('/treatments/clear-imported', requireAdminPermission('Treatment Mapp
   }
 });
 
-router.post('/imports', requireAdminPermission('Upload CSV / Excel', 'create'), async (req, res, next) => {
+router.post('/imports', async (req, res, next) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       const record = {
@@ -1864,7 +989,7 @@ router.post('/imports', requireAdminPermission('Upload CSV / Excel', 'create'), 
   }
 });
 
-router.post('/imports/master-data', requireAdminPermission('Upload CSV / Excel', 'create'), async (req, res, next) => {
+router.post('/imports/master-data', async (req, res, next) => {
   try {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     const cleanedRows = rows
@@ -2030,7 +1155,7 @@ router.post('/journey-plans', async (req, res, next) => {
   }
 });
 
-router.patch('/journey-plans/:userId', requireAdminPermission('Journey Plans', 'edit'), async (req, res, next) => {
+router.patch('/journey-plans/:userId', async (req, res, next) => {
   try {
     const { userId } = req.params;
     const { status, confirmedAt } = req.body;
@@ -2053,82 +1178,6 @@ router.patch('/journey-plans/:userId', requireAdminPermission('Journey Plans', '
     );
     if (!record) return res.status(404).json({ message: 'Journey plan not found' });
     return res.json({ message: 'Journey plan updated', record });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HOSPITAL PARTNER INQUIRY ENDPOINTS (DATA COLLECTION FOR ADMIN)
-// ─────────────────────────────────────────────────────────────────────────────
-router.post('/partner-inquiry', async (req, res, next) => {
-  try {
-    const { name, email, phone, location, message, hospitalInterest, type } = req.body;
-
-    if (!name || (!email && !phone)) {
-      return res.status(400).json({ message: 'Hospital name and contact info (email or phone) are required' });
-    }
-
-    const inquiryId = `INQ-HOSP-${new Date().getFullYear()}-${crypto.randomInt(10000, 99999)}`;
-
-    const publicData = {
-      inquiryId,
-      name,
-      email: email || '',
-      phone: phone || '',
-      location: location || 'Saudi Arabia',
-      message: message || '',
-      hospitalInterest: hospitalInterest || 'Hospital Partner Growth & DOOH Ads',
-      type: type || 'Hospital Partner Growth Strategy',
-      submittedAt: new Date().toISOString(),
-      status: 'New Partner Inquiry',
-    };
-
-    const record = buildAdminRecord({
-      title: `Hospital Partner Inquiry: ${name} (${publicData.location})`,
-      status: 'Active',
-      publicData,
-      confidential: { email, phone, userAgent: req.headers['user-agent'] || '' },
-      createdBy: 'hospital-partner-landing',
-    }, 'inquiry');
-
-    if (mongoose.connection.readyState !== 1) {
-      const saved = {
-        _id: `local-inquiry-${crypto.randomUUID()}`,
-        ...record,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      memoryRecords = [saved, ...memoryRecords];
-      return res.status(201).json({ message: 'Partner strategy inquiry submitted successfully', inquiryId, record: saved });
-    }
-
-    const saved = await AdminOperation.create(record);
-
-    return res.status(201).json({ message: 'Partner strategy inquiry submitted successfully', inquiryId, record: saved });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.get('/partner-inquiries', async (req, res, next) => {
-  try {
-    if (mongoose.connection.readyState !== 1) {
-      const inquiries = memoryRecords.filter(
-        (r) => r.recordType === 'inquiry' && (r.createdBy === 'hospital-partner-landing' || r.publicData?.hospitalInterest),
-      );
-      return res.json({ inquiries });
-    }
-
-    const inquiries = await AdminOperation.find({
-      recordType: 'inquiry',
-      $or: [
-        { createdBy: 'hospital-partner-landing' },
-        { 'publicData.hospitalInterest': { $exists: true } },
-      ],
-    }).sort({ createdAt: -1 });
-
-    return res.json({ inquiries });
   } catch (error) {
     next(error);
   }

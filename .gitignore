@@ -1,6 +1,61 @@
+# Dependencies
 node_modules/
+.pnp
+.pnp.js
+
+# Environment files
 .env
-*.log
-.DS_Store
+.env.local
+.env.*.local
+env(1)
+env(2)
+
+# Build output
 dist/
+build/
+.vite/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Coverage
 coverage/
+.nyc_output/
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# PM2
+.pm2/logs/
+.pm2/pids/
+
+# MongoDB data (never commit)
+data/db/
+
+# AWS
+.aws/
+
+# Misc
+*.tgz
+*.tar.gz
+!public/
+
+# CI/CD test files
+.cicd-test
