@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  id-token: write
-
 env:
   AWS_REGION: ap-south-1
   EC2_INSTANCE: i-048117c391049faa7
@@ -20,7 +16,8 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::987119352718:role/kairacure-github-deploy
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Build artifact
@@ -84,7 +81,8 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::987119352718:role/kairacure-github-deploy
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: actions/setup-node@v4
@@ -108,7 +106,8 @@ jobs:
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::987119352718:role/kairacure-github-deploy
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: actions/setup-node@v4
@@ -131,12 +130,12 @@ jobs:
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::987119352718:role/kairacure-github-deploy
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Invalidate CloudFront caches
         run: |
-          # Get distribution IDs and invalidate (will work once CF is set up)
           WEB_DIST=$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='Kairacure Web'].Id" --output text --region ${{ env.AWS_REGION }} 2>/dev/null)
           ADMIN_DIST=$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='Kairacure Admin'].Id" --output text --region ${{ env.AWS_REGION }} 2>/dev/null)
           if [ -n "$WEB_DIST" ] && [ "$WEB_DIST" != "None" ]; then
