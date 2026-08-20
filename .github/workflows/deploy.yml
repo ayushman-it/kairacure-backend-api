@@ -40,7 +40,7 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           COMMIT=$(git rev-parse --short HEAD)
           zip -r /tmp/backend.zip . \
-            -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" ".env*" "node_modules/*" "*.md"
+            -x ".git/*" ".github/*" "infra/*" "backups/*" ".env*" "node_modules/*" "*.md"
           echo "TIMESTAMP=${TIMESTAMP}" >> $GITHUB_ENV
           echo "COMMIT=${COMMIT}" >> $GITHUB_ENV
 
