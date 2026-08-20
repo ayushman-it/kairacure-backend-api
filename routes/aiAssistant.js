@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { getAdminOperationRecordsForAi } from './admin.js';
 
-
 const router = Router();
 
 const siteContext = `
@@ -111,30 +110,44 @@ Your role:
 - Never reveal confidential/internal fields (margins, contract notes, private phone numbers).
 - Never provide a medical diagnosis. Frame all health information as general guidance and always recommend consulting a qualified doctor.
 
-Reply style:
+Reply style & Formatting Rules (CRITICAL):
 - Reply in the same language the user writes in. Hindi → Hindi. English → English. Hinglish → natural Hinglish. Never randomly switch languages.
-- Keep answers warm, practical, and concise. Avoid jargon unless the user uses it.
-- Use bullet points and numbered lists for clarity. Keep paragraphs short.
+- Keep answers warm, practical, structured, and concise. Avoid technical medical jargon unless the user uses it.
+- ALWAYS write each hospital recommendation on a new line starting with a dash bullet point (-). NEVER combine multiple hospital bullet points into a single text paragraph.
+- Put a clear line break between different sections and hospital cards.
+- DO NOT use markdown symbols like double asterisks (**), hashes (##, ###), or markdown headers in your response. Write clean text with clear line breaks.
 - Always end patient-facing answers with a clear "Next Step" the user can take.
 
-When a patient asks about a treatment or hospital, structure the answer as:
-1. Brief acknowledgement of the treatment need.
-2. Top 2-3 matching hospitals from the Kairacure network (with city, accreditation, and approximate INR cost if available).
-3. Suggested specialist doctor(s) if available.
-4. Approximate package or starting cost in INR (note that actual cost varies by reports, room category, doctor, and hospital).
-5. Next step: share medical reports → care@kairacure.com, or use "Plan My Journey" on the website.
-6. Short safety note: this is educational guidance; please consult a qualified physician.
+When a patient asks about a treatment or hospital, structure the answer clearly:
+Here are the top hospitals for [Treatment]:
 
-When a doctor or hospital partner asks:
-- Explain Kairacure's partner model briefly.
-- Direct them to care@kairacure.com for partnership enquiries.
+- Hospital Name (City)
+  Accreditation: JCI / NABH Accredited
+  Starting Package: INR X,XX,XXX
 
-When someone asks about cost:
-- Always quote in Indian Rupees (INR) first.
-- Provide a range if available (e.g. "INR 3,50,000 – 5,50,000 depending on hospital, room, and surgeon").
-- Mention inclusions: surgery, hospital stay, pre-op tests, post-op follow-up.
+- Hospital Name (City)
+  Accreditation: JCI / NABH Accredited
+  Starting Package: INR X,XX,XXX
 
-Kairacure brand values: Patient-first. Transparent pricing. No hidden costs. Verified hospitals.`;
+Next Steps: Share your medical reports to care@kairacure.com or click "Plan My Journey" to get a customized estimate.
+Safety Note: This information is for educational guidance. Please consult a qualified physician.`;
+
+export function formatAiReply(rawText = '') {
+  let cleaned = String(rawText || '');
+  // Strip ## or # headers at start of line
+  cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+  // Remove ** bold markers (e.g. **Title** -> Title)
+  cleaned = cleaned.replace(/\*\*(.*?)\*\*/g, '$1');
+  // Remove * italic markers
+  cleaned = cleaned.replace(/\*(.*?)\*/g, '$1');
+  // Remove __ underline markers
+  cleaned = cleaned.replace(/__(.*?)__/g, '$1');
+  // Convert inline " - " bullet points into clean newlines
+  cleaned = cleaned.replace(/([^\n])\s+-\s+([A-Z0-9])/g, '$1\n- $2');
+  // Clean up extra blank lines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
+}
 
 router.post('/', async (req, res, next) => {
   try {
@@ -145,8 +158,12 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ message: 'Message is required' });
     }
 
-    if (!process.env.OPENROUTER_API_KEY) {
-      return res.status(503).json({ message: 'OPENROUTER_API_KEY is not configured' });
+    const groqKey = process.env.GROQ_API_KEY;
+    const groqModel = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+
+    if (!groqKey && !openRouterKey) {
+      return res.status(503).json({ message: 'AI API Key is not configured' });
     }
 
     const adminRecords = await getAdminOperationRecordsForAi();
@@ -158,37 +175,93 @@ router.post('/', async (req, res, next) => {
       content: String(msg.content || ''),
     }));
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': process.env.CLIENT_ORIGIN || 'http://localhost:5173',
-        'X-Title': 'Kairacure Medical Travel Assistant',
-      },
-      body: JSON.stringify({
-        model: process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: `${SYSTEM_PROMPT}\n\n--- Kairacure Platform Context ---\n${siteContext}\n\n--- Live Admin Database ---\n${adminContext}`,
-          },
-          ...conversationHistory,
-          { role: 'user', content: message },
-        ],
-      }),
-    });
+    let rawReply = '';
 
-    const data = await response.json();
+    // 1. Try Groq API first for lightning fast inference with multi-model fallbacks
+    if (groqKey) {
+      const groqModelsToTry = Array.from(new Set([
+        process.env.GROQ_MODEL || 'llama-3.1-70b-versatile',
+        'llama-3.1-70b-versatile',
+        'llama3-70b-8192',
+        'llama-3.1-8b-instant',
+        'mixtral-8x7b-32768',
+      ])).filter(Boolean);
 
-    if (!response.ok) {
-      return res.status(response.status).json({ message: data?.error?.message || 'OpenRouter request failed' });
+      for (const currentModel of groqModelsToTry) {
+        try {
+          const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${groqKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model: currentModel,
+              messages: [
+                {
+                  role: 'system',
+                  content: `${SYSTEM_PROMPT}\n\n--- Kairacure Platform Context ---\n${siteContext}\n\n--- Live Admin Database ---\n${adminContext}`,
+                },
+                ...conversationHistory,
+                { role: 'user', content: message },
+              ],
+              temperature: 0.6,
+              max_tokens: 1024,
+            }),
+          });
+
+          const groqData = await groqResponse.json();
+          if (groqResponse.ok && groqData.choices?.[0]?.message?.content) {
+            rawReply = groqData.choices[0].message.content;
+            break; // Success! Break model loop
+          } else {
+            console.warn(`Groq API model ${currentModel} failed:`, groqData?.error?.message || groqResponse.statusText);
+          }
+        } catch (err) {
+          console.warn(`Groq API error on model ${currentModel}:`, err.message);
+        }
+      }
     }
 
-    return res.json({ reply: data.choices?.[0]?.message?.content || 'I could not generate a response right now.' });
+    // 2. Fallback to OpenRouter if Groq didn't return a reply
+    if (!rawReply && openRouterKey) {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${openRouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+          'X-Title': 'Kairacure Medical Travel Assistant',
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: `${SYSTEM_PROMPT}\n\n--- Kairacure Platform Context ---\n${siteContext}\n\n--- Live Admin Database ---\n${adminContext}`,
+            },
+            ...conversationHistory,
+            { role: 'user', content: message },
+          ],
+        }),
+      });
+
+      const data = await response.json();
+      if (response.ok && data.choices?.[0]?.message?.content) {
+        rawReply = data.choices[0].message.content;
+      }
+    }
+
+    if (!rawReply) {
+      return res.status(500).json({ message: 'Failed to generate response from AI backend.' });
+    }
+
+    const finalReply = formatAiReply(rawReply);
+    return res.json({ reply: finalReply });
   } catch (error) {
     next(error);
   }
 });
 
 export default router;
+
