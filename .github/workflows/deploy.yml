@@ -27,7 +27,7 @@ jobs:
       - name: Build artifact
         run: |
           npm ci --production
-          zip -r /tmp/backend.zip . -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" ".env*" "node_modules/.package-lock.json" ".cicd-test"
+          zip -r /tmp/backend.zip . -x ".git/*" ".github/*" "infra/*" "scripts/*" "backups/*" "data/*" ".env*" "node_modules/*" ".cicd-test" "*.md"
 
       - name: Upload to S3
         run: |
@@ -41,46 +41,55 @@ jobs:
             --region ${{ env.AWS_REGION }} \
             --instance-ids ${{ env.EC2_INSTANCE }} \
             --document-name "AWS-RunShellScript" \
+            --timeout-seconds 300 \
             --parameters 'commands=[
+              "set -e",
               "cd /opt/kairacure",
-              "cp kairacure-backend-api/.env kairacure-backend-api/.env.backup 2>/dev/null || true",
               "aws s3 cp s3://kairacure-artifacts-prod/backend/latest.zip /tmp/backend.zip --region ap-south-1",
               "pm2 stop kairacure-api 2>/dev/null || true",
               "rm -rf kairacure-backend-api",
               "mkdir -p kairacure-backend-api",
               "unzip -o /tmp/backend.zip -d kairacure-backend-api/",
-              "cp kairacure-backend-api/.env.backup kairacure-backend-api/.env 2>/dev/null || true",
+              "rm -f /tmp/backend.zip",
               "cd kairacure-backend-api",
-              "npm ci --production 2>&1 | tail -3",
+              "aws s3 cp s3://kairacure-artifacts-prod/config/prod.env .env --region ap-south-1",
+              "npm ci --production 2>&1 | tail -5",
               "pm2 start index.js --name kairacure-api --max-memory-restart 300M",
               "pm2 save",
-              "sleep 3",
-              "curl -sf http://localhost:5000/api/health || exit 1",
+              "sleep 5",
+              "HEALTH=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5000/api/health)",
+              "if [ \"$HEALTH\" != \"200\" ]; then echo \"Health check failed: $HEALTH\"; exit 1; fi",
               "echo DEPLOY_SUCCESS"
             ]' \
             --query 'Command.CommandId' --output text)
           echo "SSM Command: $COMMAND_ID"
-          sleep 60
-          STATUS=$(aws ssm get-command-invocation \
-            --region ${{ env.AWS_REGION }} \
-            --command-id "$COMMAND_ID" \
-            --instance-id ${{ env.EC2_INSTANCE }} \
-            --query 'Status' --output text)
-          if [ "$STATUS" != "Success" ]; then
-            echo "Deploy failed:"
-            aws ssm get-command-invocation \
+          echo "Waiting for deployment (up to 5 minutes)..."
+          for i in $(seq 1 30); do
+            sleep 10
+            STATUS=$(aws ssm get-command-invocation \
               --region ${{ env.AWS_REGION }} \
               --command-id "$COMMAND_ID" \
               --instance-id ${{ env.EC2_INSTANCE }} \
-              --query 'StandardOutputContent' --output text
-            aws ssm get-command-invocation \
-              --region ${{ env.AWS_REGION }} \
-              --command-id "$COMMAND_ID" \
-              --instance-id ${{ env.EC2_INSTANCE }} \
-              --query 'StandardErrorContent' --output text
-            exit 1
-          fi
-          echo "Backend deployed successfully"
+              --query 'Status' --output text 2>/dev/null)
+            echo "  [$i] Status: $STATUS"
+            if [ "$STATUS" = "Success" ]; then
+              echo "Backend deployed successfully!"
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "Deploy failed:"
+              aws ssm get-command-invocation \
+                --region ${{ env.AWS_REGION }} \
+                --command-id "$COMMAND_ID" \
+                --instance-id ${{ env.EC2_INSTANCE }} \
+                --query 'StandardOutputContent' --output text 2>/dev/null | tail -20
+              aws ssm get-command-invocation \
+                --region ${{ env.AWS_REGION }} \
+                --command-id "$COMMAND_ID" \
+                --instance-id ${{ env.EC2_INSTANCE }} \
+                --query 'StandardErrorContent' --output text 2>/dev/null | tail -20
+              exit 1
+            fi
+          done
 
   deploy-web:
     runs-on: ubuntu-latest
