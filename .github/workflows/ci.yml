@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,12 +18,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint syntax (all JS files)
+      - name: Syntax check all JS files
         run: |
           ERRORS=0
           for f in $(find . -name '*.js' -not -path './node_modules/*' -not -path './.git/*'); do
             if ! node --check "$f" 2>/dev/null; then
-              echo "FAIL: $f"
+              echo "SYNTAX ERROR: $f"
               ERRORS=$((ERRORS + 1))
             fi
           done
@@ -33,7 +33,5 @@ jobs:
           fi
           echo "All JS files pass syntax check"
 
-      - name: Verify server starts
-        run: timeout 10 node index.js &
-        timeout 15 bash -c 'until curl -sf http://localhost:5000/api/health 2>/dev/null; do sleep 2; done' || true
-        kill %1 2>/dev/null || true
+      - name: Verify entry point
+        run: node --check index.js
